@@ -217,13 +217,7 @@ with col1:
         st.header("Semantic Search")
         
         query = st.text_input("Enter your search query:")
-        col_search1, col_search2 = st.columns(2)
-        
-        with col_search1:
-            negative_keywords = st.text_input("Exclude documents containing (comma-separated):")
-        
-        with col_search2:
-            include_keywords = st.text_input("Include only documents containing (comma-separated):")
+        include_keywords = st.text_input("Filter by keywords (comma-separated):", help="Enter keywords to filter results. Only shows results containing ALL keywords (case-insensitive).")
         
         similarity_threshold = st.slider("Similarity threshold", 0.0, 1.0, 0.35)
 
@@ -267,16 +261,13 @@ with col1:
                             results['similarity_score'] = similarities[0][above_threshold_indices]
                             results = results.sort_values(by='similarity_score', ascending=False)
 
-                            # Apply keyword filters
-                            if negative_keywords.strip():
-                                neg_words = [w.strip().lower() for w in negative_keywords.split(',') if w.strip()]
-                                if neg_words:
-                                    results = results[results.apply(lambda row: all(w not in (' '.join(row.astype(str)).lower()) for w in neg_words), axis=1)]
-
+                            # Apply include keywords filter
                             if include_keywords.strip():
                                 inc_words = [w.strip().lower() for w in include_keywords.split(',') if w.strip()]
                                 if inc_words:
-                                    results = results[results.apply(lambda row: all(w in (' '.join(row.astype(str)).lower()) for w in inc_words), axis=1)]
+                                    # Only search in selected text columns
+                                    text_content = results[text_columns_selected].astype(str).agg(' '.join, axis=1).str.lower()
+                                    results = results[text_content.apply(lambda x: all(w in x for w in inc_words))]
 
                             if results.empty:
                                 st.warning("No results found after applying filters.")
@@ -284,7 +275,17 @@ with col1:
                             else:
                                 st.session_state.search_results = results
             else:
-                # If no search query, just use filtered results
+                # If no search query, just use filtered results and apply keyword filtering
+                filtered_results = apply_filters(df)
+                
+                # Apply include keywords filter even without semantic search
+                if include_keywords.strip():
+                    inc_words = [w.strip().lower() for w in include_keywords.split(',') if w.strip()]
+                    if inc_words:
+                        # Only search in selected text columns
+                        text_content = filtered_results[text_columns_selected].astype(str).agg(' '.join, axis=1).str.lower()
+                        filtered_results = filtered_results[text_content.apply(lambda x: all(w in x for w in inc_words))]
+                
                 if filtered_results.empty:
                     st.warning("No results found after applying filters.")
                     st.session_state.search_results = None
