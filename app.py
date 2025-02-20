@@ -85,41 +85,63 @@ def load_or_compute_embeddings(df, using_default_dataset, uploaded_file_name=Non
     if text_columns is None or len(text_columns) == 0:
         return None, None
 
-    embeddings_dir = os.path.dirname(__file__)
+    # Get the absolute path of the current script's directory
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Create 'embeddings' subdirectory if it doesn't exist
+    embeddings_dir = os.path.join(current_dir, 'embeddings')
+    os.makedirs(embeddings_dir, exist_ok=True)
+    
+    # Create a consistent filename
     cols_key = "_".join(sorted(text_columns))
     
     if using_default_dataset:
         embeddings_file = os.path.join(embeddings_dir, f'PRMS_2022_2023_QAed_{cols_key}.pkl')
+        st.sidebar.info(f"Embeddings file path: {embeddings_file}")  # Debug info
     else:
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = os.path.splitext(uploaded_file_name)[0] if uploaded_file_name else "custom_dataset"
         embeddings_file = os.path.join(embeddings_dir, f"{base_name}_{cols_key}_{timestamp_str}.pkl")
 
+    # First check if we have valid embeddings in session state
+    if ('embeddings' in st.session_state and 
+        'last_text_columns' in st.session_state and 
+        st.session_state['last_text_columns'] == text_columns and 
+        len(st.session_state['embeddings']) == len(df)):
+        return st.session_state['embeddings'], embeddings_file
+
+    # If not in session state, try to load from file
+    if os.path.exists(embeddings_file):
+        try:
+            with open(embeddings_file, 'rb') as f:
+                embeddings = pickle.load(f)
+                if len(embeddings) == len(df):  # Verify the embeddings match the dataset size
+                    st.write(f"Loading pre-calculated embeddings from: {embeddings_file}")
+                    # Store in session state for future use
+                    st.session_state['embeddings'] = embeddings
+                    st.session_state['last_text_columns'] = text_columns
+                    return embeddings, embeddings_file
+        except Exception as e:
+            st.error(f"Error loading embeddings file: {str(e)}")
+
+    # If we reach here, we need to compute new embeddings
+    st.write(f"Generating new embeddings, will save to: {embeddings_file}")
     df_fill = df.fillna("")
     texts = df_fill[text_columns].astype(str).agg(' '.join, axis=1).tolist()
-
-    if 'embeddings' in st.session_state and 'embeddings_file' in st.session_state and 'last_text_columns' in st.session_state:
-        if st.session_state['last_text_columns'] == text_columns and len(st.session_state['embeddings']) == len(texts):
-            return st.session_state['embeddings'], st.session_state['embeddings_file']
-
-    if os.path.exists(embeddings_file):
-        with open(embeddings_file, 'rb') as f:
-            embeddings = pickle.load(f)
-        if len(embeddings) == len(texts):
-            st.write("Loading pre-calculated embeddings...")
-            st.session_state['embeddings'] = embeddings
-            st.session_state['embeddings_file'] = embeddings_file
-            st.session_state['last_text_columns'] = text_columns
-            return embeddings, embeddings_file
-
-    st.write("Generating embeddings...")
     model = get_embedding_model()
     embeddings = generate_embeddings(texts, model)
-    with open(embeddings_file, 'wb') as f:
-        pickle.dump(embeddings, f)
+    
+    # Save to file and session state
+    try:
+        with open(embeddings_file, 'wb') as f:
+            pickle.dump(embeddings, f)
+        st.success(f"Saved embeddings to: {embeddings_file}")
+    except Exception as e:
+        st.error(f"Error saving embeddings file: {str(e)}")
+    
     st.session_state['embeddings'] = embeddings
-    st.session_state['embeddings_file'] = embeddings_file
     st.session_state['last_text_columns'] = text_columns
+    
     return embeddings, embeddings_file
 
 def reset_filters():
@@ -237,8 +259,9 @@ with col1:
             # Then apply semantic search if query exists
             if query.strip() and text_columns_selected:
                 with st.spinner("Performing Semantic Search..."):
+                    # Get embeddings for the full dataset
                     embeddings, _ = load_or_compute_embeddings(
-                        filtered_results,
+                        df,  # Use full dataset instead of filtered_results
                         st.session_state.get('using_default_dataset', False),
                         st.session_state.get('uploaded_file_name', None),
                         text_columns_selected
@@ -246,34 +269,46 @@ with col1:
 
                     if embeddings is not None:
                         model = get_embedding_model()
-                        df_fill = filtered_results.fillna("")
+                        df_fill = df.fillna("")  # Use full dataset
                         search_texts = df_fill[text_columns_selected].agg(' '.join, axis=1).tolist()
                         query_embedding = model.encode([query], device=device)
                         similarities = cosine_similarity(query_embedding, embeddings)
                         
+                        # Get indices that meet similarity threshold
                         above_threshold_indices = np.where(similarities[0] > similarity_threshold)[0]
 
                         if len(above_threshold_indices) == 0:
                             st.warning("No results found above the similarity threshold.")
                             st.session_state.search_results = None
                         else:
-                            results = filtered_results.iloc[above_threshold_indices].copy()
-                            results['similarity_score'] = similarities[0][above_threshold_indices]
-                            results = results.sort_values(by='similarity_score', ascending=False)
-
-                            # Apply include keywords filter
-                            if include_keywords.strip():
-                                inc_words = [w.strip().lower() for w in include_keywords.split(',') if w.strip()]
-                                if inc_words:
-                                    # Only search in selected text columns
-                                    text_content = results[text_columns_selected].astype(str).agg(' '.join, axis=1).str.lower()
-                                    results = results[text_content.apply(lambda x: all(w in x for w in inc_words))]
-
-                            if results.empty:
+                            # Apply filters to the original dataframe indices first
+                            filtered_indices = filtered_results.index
+                            
+                            # Find intersection of filtered indices and similarity threshold indices
+                            valid_indices = np.intersect1d(filtered_indices, above_threshold_indices)
+                            
+                            if len(valid_indices) == 0:
                                 st.warning("No results found after applying filters.")
                                 st.session_state.search_results = None
                             else:
-                                st.session_state.search_results = results
+                                # Get the results and their similarity scores
+                                results = df.iloc[valid_indices].copy()
+                                results['similarity_score'] = similarities[0][valid_indices]
+                                results = results.sort_values(by='similarity_score', ascending=False)
+
+                                # Apply include keywords filter
+                                if include_keywords.strip():
+                                    inc_words = [w.strip().lower() for w in include_keywords.split(',') if w.strip()]
+                                    if inc_words:
+                                        # Only search in selected text columns
+                                        text_content = results[text_columns_selected].astype(str).agg(' '.join, axis=1).str.lower()
+                                        results = results[text_content.apply(lambda x: all(w in x for w in inc_words))]
+
+                                if results.empty:
+                                    st.warning("No results found after applying filters.")
+                                    st.session_state.search_results = None
+                                else:
+                                    st.session_state.search_results = results
             else:
                 # If no search query, just use filtered results and apply keyword filtering
                 filtered_results = apply_filters(df)
