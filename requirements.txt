@@ -1,0 +1,10 @@
+streamlit>=1.31.0
+pandas>=2.2.0
+torch>=2.2.0
+sentence-transformers>=2.3.1
+nltk>=3.8.1
+scikit-learn>=1.4.0
+openai>=1.12.0
+openpyxl>=3.1.2  # For Excel file support
+numpy>=1.26.0 
+transformers>=4.38.0  # For AutoTokenizer 
